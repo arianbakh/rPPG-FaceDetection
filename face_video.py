@@ -55,7 +55,7 @@ def get_rotation(right_eye, left_eye):
     return direction, angle
 
 
-def get_faces(frames, inflate=1.2, align=True, sample_frame_index=None, sample_file_path=None):
+def get_faces(frames, inflate=1.0, align=True, sample_frame_index=None, sample_file_path=None):
     faces = []
     max_square_size = 0
     face_frames = []
@@ -173,6 +173,6 @@ if __name__ == '__main__':
     parser.add_argument('--output-dir', type=str, help='Path of output faces video')
     parser.add_argument('--save-samples', action='store_true', help='Whether to save sample frames')
     parser.add_argument('--align', action='store_true', help='Whether to align faces')
-    parser.add_argument('--inflate', type=float, default=1.2, help='How much to inflate bounding box')
+    parser.add_argument('--inflate', type=float, default=1.0, help='How much to inflate bounding box')
     args = parser.parse_args()
     run(args)
