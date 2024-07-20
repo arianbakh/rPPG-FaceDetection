@@ -1,0 +1,4 @@
+videos/*
+!videos/PLACEHOLDER
+outputs/*
+!outputs/PLACEHOLDER
