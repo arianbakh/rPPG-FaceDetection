@@ -8,4 +8,4 @@
 
 # Inference
 
-1. `TF_CPP_MIN_LOG_LEVEL=2 python face_video.py --video-path videos/vid.mp4 --output-dir outputs --save-sample --align`
+1. `TF_CPP_MIN_LOG_LEVEL=2 python face_video.py --video-path videos/multiple_short.mp4 --output-dir outputs`
