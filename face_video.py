@@ -1,10 +1,13 @@
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 import argparse
 import cv2
 import math
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-import os
 import shutil
 import sys
 
@@ -158,7 +161,7 @@ def get_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate
 
     # crop the face
     new_face_img = crop_image(rotated_face_img, new_center_x, new_center_y, new_square_size)
-    
+
     return new_face_img
 
 
@@ -275,6 +278,39 @@ def get_clips(face_ds, frame_ds, off_screen_tolerance):
     return clips
 
 
+def remove_short(clips, length_threshold):
+    filtered_clips = []
+    for clip in clips:
+        if len(clip['face_ids']) >= length_threshold:
+            filtered_clips.append(clip)
+    return filtered_clips
+
+
+def remove_spoofed(face_ds, clips, vote_threshold=0.05):
+    antispoof_model = modeling.build_model(model_name='Fasnet')
+    filtered_clips = []
+    for clip in clips:
+        votes = []
+        for data in clip['face_ids']:
+            face_id = data['face_id']
+            face_img = face_ds[face_id]['face_img']
+            is_real, _ = antispoof_model.analyze(
+                img=face_img,
+                facial_area=(0, 0, face_img.shape[0], face_img.shape[1])
+            )
+            votes.append(is_real)
+        mean_vote = np.mean(votes)
+        if mean_vote >= vote_threshold:
+            filtered_clips.append(clip)
+    return filtered_clips
+
+
+def filter_clips(face_ds, clips, fps):
+    filtered_clips = remove_short(clips, fps)
+    filtered_clips = remove_spoofed(face_ds, clips)
+    return filtered_clips
+
+
 def get_clip_images(face_ds, clip):
     clip_imgs = []
     last_frame_index = -1
@@ -336,6 +372,7 @@ def compress_clips(output_dir, video_file_name):
     clips_dir = get_clips_dir(output_dir, video_file_name)
     output_path = os.path.join(output_dir, '%s_clips' % video_file_name)
     shutil.make_archive(output_path, 'zip', clips_dir)
+    shutil.rmtree(clips_dir)
 
 
 def run(args):
@@ -349,7 +386,8 @@ def run(args):
     add_person_ids(face_ds, embeddings_index, args.output_dir, video_file_name)
     off_screen_tolerance = fps // 10  # 0.1 seconds
     clips = get_clips(face_ds, frame_ds, off_screen_tolerance)
-    render_clips(clips, face_ds, args.output_dir, video_file_name, fps)
+    filtered_clips = filter_clips(face_ds, clips, fps)
+    render_clips(filtered_clips, face_ds, args.output_dir, video_file_name, fps)
     compress_clips(args.output_dir, video_file_name)
 
 
