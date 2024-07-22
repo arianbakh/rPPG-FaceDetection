@@ -12,6 +12,7 @@ import cv2
 import math
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import shutil
 import sys
@@ -62,7 +63,6 @@ def create_data_structures(frames, video_file_name):
                 'face_rect': face_rect,
                 'right_eye': face_instance['landmarks']['right_eye'],
                 'left_eye': face_instance['landmarks']['left_eye'],
-                'person_id': None,
                 'frame_index': frame_index,
             }
             frame_faces.append(face_id)
@@ -216,81 +216,121 @@ def add_person_embedding(face_ds):
     return embeddings_index
 
 
-def add_person_ids(face_ds, embeddings_index, output_dir, video_file_name):
-    print('Adding person IDs...')
-    threshold = find_threshold('Facenet512', 'cosine') + 0.01
-    distances = pdist(embeddings_index['embeddings'], metric=find_cosine_distance)
-    distance_matrix = squareform(distances)
-    adjacency_matrix = (distance_matrix < threshold).astype(int)
-    sparse_matrix = csr_matrix(adjacency_matrix)
-    num_components, labels = connected_components(csgraph=sparse_matrix, directed=False, connection='strong', return_labels=True)
-    print('%d distinct people detected' % num_components)
-    for i in range(len(labels)):
-        face_id = embeddings_index['face_ids'][i]
-        person_id = labels[i]
-        face_ds[face_id]['person_id'] = person_id
-    for i in range(num_components):
-        component = np.where(labels == i)[0]
-        rows = cols = int(math.ceil(math.sqrt(len(component))))
-        fig, axes = plt.subplots(rows, cols, figsize=(rows * 5, cols * 5))
-        for j in range(len(component)):
-            row = j // rows
-            col = j % rows
-            node_index = component[j]
-            node_face_id = embeddings_index['face_ids'][node_index]
-            node_img = face_ds[node_face_id]['face_img']
-            axes[row][col].imshow(node_img)
-            axes[row][col].axis('off')
-        for j in range(rows * cols - len(component), rows * cols):
-            row = j // rows
-            col = j % rows
-            axes[row][col].axis('off')
-        plt.savefig(os.path.join(output_dir, '%s_component%d' % (video_file_name, i)))
+def get_embedding_distance(face_ds, face_id1, face_id2):
+    embedding1 = face_ds[face_id1]['embedding']
+    embedding2 = face_ds[face_id2]['embedding']
+    return find_cosine_distance(embedding1, embedding2)
 
 
-def get_clips(face_ds, frame_ds, off_screen_tolerance):
+def get_iou_similarity(face_ds, face_id1, face_id2):
+    x_min1, y_min1, x_max1, y_max1 = face_ds[face_id1]['face_rect']
+    x_min2, y_min2, x_max2, y_max2 = face_ds[face_id2]['face_rect']
+    x_min_inter = max(x_min1, x_min2)
+    y_min_inter = max(y_min1, y_min2)
+    x_max_inter = min(x_max1, x_max2)
+    y_max_inter = min(y_max1, y_max2)
+    inter_width = max(0, x_max_inter - x_min_inter)
+    inter_height = max(0, y_max_inter - y_min_inter)
+    inter_area = inter_width * inter_height
+    area_rect1 = (x_max1 - x_min1) * (y_max1 - y_min1)
+    area_rect2 = (x_max2 - x_min2) * (y_max2 - y_min2)
+    union_area = area_rect1 + area_rect2 - inter_area
+    iou = inter_area / union_area if union_area != 0 else 0
+    return iou
+
+
+def get_location_similarity(face_ds, frame_ds, face_id1, face_id2):
+    face1_center_x = (face_ds[face_id1]['face_rect'][2] + face_ds[face_id1]['face_rect'][0]) / 2
+    face1_center_y = (face_ds[face_id1]['face_rect'][3] + face_ds[face_id1]['face_rect'][1]) / 2
+    face2_center_x = (face_ds[face_id2]['face_rect'][2] + face_ds[face_id2]['face_rect'][0]) / 2
+    face2_center_y = (face_ds[face_id2]['face_rect'][3] + face_ds[face_id2]['face_rect'][1]) / 2
+    center_distance = math.sqrt((face1_center_x - face2_center_x) ** 2 + (face1_center_y - face2_center_y) ** 2)
+    frame1_index = face_ds[face_id1]['frame_index']
+    frame1_img = frame_ds[frame1_index]['frame_img']
+    frame1_width = frame1_img.shape[1]
+    frame1_height = frame1_img.shape[0]
+    max_distance = math.sqrt(frame1_width ** 2 + frame1_height ** 2)  # assuming all frame sizes are equal
+    return 1 - center_distance / max_distance
+
+
+def get_area_similarity(face_ds, face_id1, face_id2, epsilon=1e-8):
+    face1_width = face_ds[face_id1]['face_rect'][2] - face_ds[face_id1]['face_rect'][0]
+    face1_height = face_ds[face_id1]['face_rect'][3] - face_ds[face_id1]['face_rect'][1]
+    face_1_area = face1_width * face1_height
+    face2_width = face_ds[face_id2]['face_rect'][2] - face_ds[face_id2]['face_rect'][0]
+    face2_height = face_ds[face_id2]['face_rect'][3] - face_ds[face_id2]['face_rect'][1]
+    face_2_area = face2_width * face2_height
+    return min(face_1_area / (face_2_area + epsilon), face_2_area / (face_1_area + epsilon))
+
+
+def get_resolution_coefficient(face_ds, face_id1, face_id2):
+    facenet512_input_size = 160
+    half_size = facenet512_input_size / 2
+    face1_width = face_ds[face_id1]['face_rect'][2] - face_ds[face_id1]['face_rect'][0]
+    face1_height = face_ds[face_id1]['face_rect'][3] - face_ds[face_id1]['face_rect'][1]
+    face2_width = face_ds[face_id2]['face_rect'][2] - face_ds[face_id2]['face_rect'][0]
+    face2_height = face_ds[face_id2]['face_rect'][3] - face_ds[face_id2]['face_rect'][1]
+    resolution = min(face1_width, face1_height, face2_width, face2_height)
+    return bound(0, resolution - half_size, half_size) / half_size
+
+
+def get_face_similarity(face_ds, frame_ds, face_id1, face_id2):
+    """
+    The range all metrics is [0, 1]
+    In all metrics, higher is better
+    """
+    embedding_distance = get_embedding_distance(face_ds, face_id1, face_id2)  # [0, 2] lower is better
+    if embedding_distance <= find_threshold('Facenet512', 'cosine'):
+        same_person = 1
+    else:
+        same_person = 0
+    embedding_similarity = 1 - embedding_distance / 2  # [0, 1] higher is better
+    resolution_coefficient = get_resolution_coefficient(face_ds, face_id1, face_id2)
+    iou_similarity = get_iou_similarity(face_ds, face_id1, face_id2)
+    location_similarity = get_location_similarity(face_ds, frame_ds, face_id1, face_id2)
+    area_similarity = get_area_similarity(face_ds, face_id1, face_id2)
+    deep_similarity = (same_person + embedding_similarity) * resolution_coefficient
+    classic_similarity = (iou_similarity + location_similarity + area_similarity) / 3
+    similarity = (deep_similarity + classic_similarity) / 2
+    return similarity
+
+
+def get_clips(face_ds, frame_ds):
     print('Generating clips...')
+    clips_graph = nx.Graph()
+    for i in range(len(frame_ds) - 1):
+        current_frame_face_ids = frame_ds[i]['face_ids']
+        next_frame_face_ids = frame_ds[i + 1]['face_ids']
+        if i == 0:
+            clips_graph.add_nodes_from(current_frame_face_ids, frame=i)    
+        clips_graph.add_nodes_from(next_frame_face_ids, frame=i + 1)
+        for current_frame_face_id in current_frame_face_ids:
+            for next_frame_face_id in next_frame_face_ids:
+                face_similarity = get_face_similarity(face_ds, frame_ds, current_frame_face_id, next_frame_face_id)
+                clips_graph.add_edge(current_frame_face_id, next_frame_face_id, weight=face_similarity)
+        nodes_subset = current_frame_face_ids + next_frame_face_ids
+        subgraph = clips_graph.subgraph(nodes_subset).copy()
+        max_matching = nx.max_weight_matching(subgraph, maxcardinality=True)
+        edges_to_keep = set(max_matching)
+        edges_to_keep_inverted = set([(a, b) for (b, a) in edges_to_keep])
+        edges_to_remove = set(subgraph.edges()) - (edges_to_keep | edges_to_keep_inverted)  # TODO write with complement
+        clips_graph.remove_edges_from(edges_to_remove)
+    components = nx.connected_components(clips_graph)
     clips = []
-    active_person_ids = {}
-    clip_counter = 0
-    for frame_index, frame_data in enumerate(frame_ds):
-        frame_face_ids = frame_data['face_ids']
-        for face_id in frame_face_ids:
-            person_id = face_ds[face_id]['person_id']
-            if person_id not in active_person_ids:
-                new_clip = {
-                    'clip_id': clip_counter,
-                    'start_frame': frame_index,
-                    'person_id': person_id,
-                    'face_ids': [{
-                        'frame_index': frame_index,
-                        'face_id': face_id,
-                    }],
-                }
-                clip_counter += 1
-                active_person_ids[person_id] = {
-                    'off_screen': 0,
-                    'touched_this_frame': True,
-                    'clip': new_clip,
-                }
-            else:
-                active_person_ids[person_id]['clip']['face_ids'].append({
-                    'frame_index': frame_index,
-                    'face_id': face_id,
-                })
-                active_person_ids[person_id]['touched_this_frame'] = True
-        person_ids_to_remove = []
-        for person_id in active_person_ids.keys():
-            if not active_person_ids[person_id]['touched_this_frame']:
-                active_person_ids[person_id]['off_screen'] += 1
-            active_person_ids[person_id]['touched_this_frame'] = False
-            if active_person_ids[person_id]['off_screen'] > off_screen_tolerance:
-                person_ids_to_remove.append(person_id)
-                clips.append(active_person_ids[person_id]['clip'])
-        for person_id in person_ids_to_remove:
-            del active_person_ids[person_id]
-    for person_id in active_person_ids.keys():
-        clips.append(active_person_ids[person_id]['clip'])
+    for clip_id, component in enumerate(components):
+        nodes_with_frame = [
+            (
+                node_id,
+                clips_graph.nodes[node_id]['frame']
+            ) for node_id in component
+        ]
+        sorted_nodes = sorted(nodes_with_frame, key=lambda x: x[1])
+        sorted_face_ids = [node_id for node_id, _ in sorted_nodes]
+        clip = {
+            'clip_id': clip_id,
+            'face_ids': sorted_face_ids,
+        }
+        clips.append(clip)
     return clips
 
 
@@ -307,8 +347,7 @@ def remove_spoofed(face_ds, clips, vote_threshold=0.05):
     filtered_clips = []
     for clip in clips:
         votes = []
-        for data in clip['face_ids']:
-            face_id = data['face_id']
+        for face_id in clip['face_ids']:
             face_img = face_ds[face_id]['face_img']
             is_real, _ = antispoof_model.analyze(
                 img=face_img,
@@ -330,16 +369,8 @@ def filter_clips(face_ds, clips, fps):
 
 def get_clip_images(face_ds, clip):
     clip_imgs = []
-    last_frame_index = -1
     max_size = -1
-    for data in clip['face_ids']:
-        frame_index = data['frame_index']
-        face_id = data['face_id']
-        if last_frame_index > 0:
-            padding = frame_index - last_frame_index - 1
-            last_img = clip_imgs[-1]
-            clip_imgs += [last_img] * padding
-        last_frame_index = frame_index
+    for face_id in clip['face_ids']:
         face_img = face_ds[face_id]['face_img']
         clip_imgs.append(face_img)
         face_img_size = face_img.shape[0]  # assuming square
@@ -402,9 +433,7 @@ def run(args):
     add_align(face_ds)
     add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index)
     embeddings_index = add_person_embedding(face_ds)
-    add_person_ids(face_ds, embeddings_index, args.output_dir, video_file_name)
-    off_screen_tolerance = fps // 10  # 0.1 seconds
-    clips = get_clips(face_ds, frame_ds, off_screen_tolerance)
+    clips = get_clips(face_ds, frame_ds)
     filtered_clips = filter_clips(face_ds, clips, fps)
     render_clips(filtered_clips, face_ds, args.output_dir, video_file_name, fps)
     compress_clips(args.output_dir, video_file_name)

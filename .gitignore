@@ -2,3 +2,4 @@ videos/*
 !videos/PLACEHOLDER
 outputs/*
 !outputs/PLACEHOLDER
+__pycache__/*
