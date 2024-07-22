@@ -1,6 +1,11 @@
 import os
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "6"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
+os.environ["NUMEXPR_NUM_THREADS"] = "6"
 
 import argparse
 import cv2
@@ -26,6 +31,7 @@ mpl.rcParams['axes.linewidth'] = 0
 
 
 def get_frames(video_path):
+    print('Loading video frames...')
     video = cv2.VideoCapture(video_path)
     fps = video.get(cv2.CAP_PROP_FPS)
     video.set(cv2.CAP_PROP_POS_MSEC, 0)
@@ -40,6 +46,7 @@ def get_frames(video_path):
 
 
 def create_data_structures(frames, video_file_name):
+    print('Creating face and frame data structures...')
     db_path = os.path.join('dbs', video_file_name)
     if not os.path.exists(db_path):
         os.makedirs(db_path)
@@ -94,6 +101,7 @@ def get_rotation(right_eye, left_eye):
 
 
 def add_align(face_ds):
+    print('Aligning faces...')
     for face_id, face_data in face_ds.items():
         rotation_direction, rotation_angle = get_rotation(face_data['right_eye'], face_data['left_eye'])
         face_ds[face_id]['rotation_direction'] = rotation_direction
@@ -135,10 +143,10 @@ def get_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate
     center_x, center_y, square_size = convert_coordinates(face_rect)
 
     # inflate bounding box
-    square_size = round(square_size * inflate)
+    inflated_square_size = round(square_size * inflate)
 
     # get inflated face image
-    face_img = crop_image(frame, center_x, center_y, square_size)
+    face_img = crop_image(frame, center_x, center_y, inflated_square_size)
 
     # rotate inflated face image
     rotated_face_img = Image.fromarray(face_img)
@@ -151,21 +159,26 @@ def get_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate
     )
 
     # detect one face in the new image 
-    rotated_detection_result = RetinaFace.detect_faces(rotated_face_img)  # TODO Bug: this may be empty
-    rotated_highest_score_face = max(
-        rotated_detection_result.values(),  # TODO maybe include sort by larger area?
-        key=lambda x: x['score']
-    )  # only use one face with the highest score
+    rotated_detection_result = RetinaFace.detect_faces(rotated_face_img)
+    if len(rotated_detection_result) > 0:
+        rotated_highest_score_face = max(
+            rotated_detection_result.values(),  # TODO maybe include sort by larger area?
+            key=lambda x: x['score']
+        )  # only use one face with the highest score
 
-    new_center_x, new_center_y, new_square_size = convert_coordinates(rotated_highest_score_face['facial_area'])
+        new_center_x, new_center_y, new_square_size = convert_coordinates(rotated_highest_score_face['facial_area'])
 
-    # crop the face
-    new_face_img = crop_image(rotated_face_img, new_center_x, new_center_y, new_square_size)
+        # crop the face
+        new_face_img = crop_image(rotated_face_img, new_center_x, new_center_y, new_square_size)
 
-    return new_face_img
+        return new_face_img
+    else:
+        original_face_img = crop_image(frame, center_x, center_y, square_size)
+        return original_face_img
 
 
 def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index):
+    print('Extracting face images...')
     for i, (face_id, face_data) in enumerate(face_ds.items()):
         face_img = get_face_image(
             frame_ds[face_data['frame_index']]['frame_img'],
@@ -182,6 +195,7 @@ def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index
 
 
 def add_person_embedding(face_ds):
+    print('Extracting person embeddings...')
     embeddings = []
     face_ids = []
     model: FacialRecognition = modeling.build_model('Facenet512')
@@ -203,6 +217,7 @@ def add_person_embedding(face_ds):
 
 
 def add_person_ids(face_ds, embeddings_index, output_dir, video_file_name):
+    print('Adding person IDs...')
     threshold = find_threshold('Facenet512', 'cosine') + 0.01
     distances = pdist(embeddings_index['embeddings'], metric=find_cosine_distance)
     distance_matrix = squareform(distances)
@@ -234,6 +249,7 @@ def add_person_ids(face_ds, embeddings_index, output_dir, video_file_name):
 
 
 def get_clips(face_ds, frame_ds, off_screen_tolerance):
+    print('Generating clips...')
     clips = []
     active_person_ids = {}
     clip_counter = 0
@@ -306,8 +322,9 @@ def remove_spoofed(face_ds, clips, vote_threshold=0.05):
 
 
 def filter_clips(face_ds, clips, fps):
+    print('Filtering clips...')
     filtered_clips = remove_short(clips, fps)
-    filtered_clips = remove_spoofed(face_ds, clips)
+    filtered_clips = remove_spoofed(face_ds, filtered_clips)
     return filtered_clips
 
 
@@ -358,6 +375,7 @@ def get_clips_dir(output_dir, video_file_name):
 
 
 def render_clips(clips, face_ds, output_dir, video_file_name, fps):
+    print('Rendering clips...')
     clips_dir = get_clips_dir(output_dir, video_file_name)
     if os.path.exists(clips_dir):
         shutil.rmtree(clips_dir)
@@ -369,6 +387,7 @@ def render_clips(clips, face_ds, output_dir, video_file_name, fps):
 
 
 def compress_clips(output_dir, video_file_name):
+    print('Compressing clips...')
     clips_dir = get_clips_dir(output_dir, video_file_name)
     output_path = os.path.join(output_dir, '%s_clips' % video_file_name)
     shutil.make_archive(output_path, 'zip', clips_dir)

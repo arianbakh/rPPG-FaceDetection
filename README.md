@@ -8,6 +8,4 @@
 
 # Inference
 
-1. `python face_video.py --video-path videos/multiple_short.mp4 --output-dir outputs 2>&1 | grep -v "Skipping the delay kernel, measurement accuracy will be reduced" | grep -v "but there must be at least one NUMA node, so returning NUMA node zero"`
-
-The `grep` part gets rid of annoying info and warning messages
+1. `python face_video.py --video-path videos/multiple_short.mp4 --output-dir outputs`
