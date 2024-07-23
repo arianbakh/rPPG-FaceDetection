@@ -265,13 +265,14 @@ def get_area_similarity(face_ds, face_id1, face_id2, epsilon=1e-8):
 
 def get_resolution_coefficient(face_ds, face_id1, face_id2):
     facenet512_input_size = 160
-    half_size = facenet512_input_size / 2
-    face1_width = face_ds[face_id1]['face_rect'][2] - face_ds[face_id1]['face_rect'][0]
-    face1_height = face_ds[face_id1]['face_rect'][3] - face_ds[face_id1]['face_rect'][1]
-    face2_width = face_ds[face_id2]['face_rect'][2] - face_ds[face_id2]['face_rect'][0]
-    face2_height = face_ds[face_id2]['face_rect'][3] - face_ds[face_id2]['face_rect'][1]
+    face1_rect = face_ds[face_id1]['face_rect']
+    face2_rect = face_ds[face_id2]['face_rect']
+    face1_width = face1_rect[2] - face1_rect[0]
+    face1_height = face1_rect[3] - face1_rect[1]
+    face2_width = face2_rect[2] - face2_rect[0]
+    face2_height = face2_rect[3] - face2_rect[1]
     resolution = min(face1_width, face1_height, face2_width, face2_height)
-    return bound(0, resolution - half_size, half_size) / half_size
+    return bound(0, resolution, facenet512_input_size) / facenet512_input_size
 
 
 def get_face_similarity(face_ds, frame_ds, face_id1, face_id2):
@@ -289,15 +290,37 @@ def get_face_similarity(face_ds, frame_ds, face_id1, face_id2):
     iou_similarity = get_iou_similarity(face_ds, face_id1, face_id2)
     location_similarity = get_location_similarity(face_ds, frame_ds, face_id1, face_id2)
     area_similarity = get_area_similarity(face_ds, face_id1, face_id2)
-    deep_similarity = (same_person + embedding_similarity) * resolution_coefficient
-    classic_similarity = (iou_similarity + location_similarity + area_similarity) / 3
-    similarity = (deep_similarity + classic_similarity) / 2
-    return similarity
+    deep_similarity = (same_person + embedding_similarity) * resolution_coefficient / 2
+    classic_similarity = (iou_similarity + location_similarity * area_similarity) / 2
+    face_similarity = (deep_similarity + classic_similarity) / 2 - 0.5  # TODO
+    metrics = {
+        'face_similarity': face_similarity,
+        'embedding_similarity': embedding_similarity,
+        'same_person': same_person,
+        'resolution_coefficient': resolution_coefficient,
+        'iou_similarity': iou_similarity,
+        'location_similarity': location_similarity,
+        'area_similarity': area_similarity,
+        'deep_similarity': deep_similarity,
+        'classic_similarity': classic_similarity,
+    }
+    return metrics
 
 
-def get_clips(face_ds, frame_ds):
+def get_clips(face_ds, frame_ds, output_dir, video_file_name):
     print('Generating clips...')
     clips_graph = nx.Graph()
+    metric_lists = {
+        'face_similarity': [],
+        'embedding_similarity': [],
+        'same_person': [],
+        'resolution_coefficient': [],
+        'iou_similarity': [],
+        'location_similarity': [],
+        'area_similarity': [],
+        'deep_similarity': [],
+        'classic_similarity': [],
+    }
     for i in range(len(frame_ds) - 1):
         current_frame_face_ids = frame_ds[i]['face_ids']
         next_frame_face_ids = frame_ds[i + 1]['face_ids']
@@ -306,15 +329,30 @@ def get_clips(face_ds, frame_ds):
         clips_graph.add_nodes_from(next_frame_face_ids, frame=i + 1)
         for current_frame_face_id in current_frame_face_ids:
             for next_frame_face_id in next_frame_face_ids:
-                face_similarity = get_face_similarity(face_ds, frame_ds, current_frame_face_id, next_frame_face_id)
-                clips_graph.add_edge(current_frame_face_id, next_frame_face_id, weight=face_similarity)
+                metrics = get_face_similarity(face_ds, frame_ds, current_frame_face_id, next_frame_face_id)
+                metric_lists['face_similarity'].append(metrics['face_similarity'])
+                metric_lists['embedding_similarity'].append(metrics['embedding_similarity'])
+                metric_lists['same_person'].append(metrics['same_person'])
+                metric_lists['resolution_coefficient'].append(metrics['resolution_coefficient'])
+                metric_lists['iou_similarity'].append(metrics['iou_similarity'])
+                metric_lists['location_similarity'].append(metrics['location_similarity'])
+                metric_lists['area_similarity'].append(metrics['area_similarity'])
+                metric_lists['deep_similarity'].append(metrics['deep_similarity'])
+                metric_lists['classic_similarity'].append(metrics['classic_similarity'])
+                clips_graph.add_edge(current_frame_face_id, next_frame_face_id, weight=metrics['face_similarity'])
         nodes_subset = current_frame_face_ids + next_frame_face_ids
         subgraph = clips_graph.subgraph(nodes_subset).copy()
         max_matching = nx.max_weight_matching(subgraph, maxcardinality=True)
         edges_to_keep = set(max_matching)
         edges_to_keep_inverted = set([(a, b) for (b, a) in edges_to_keep])
-        edges_to_remove = set(subgraph.edges()) - (edges_to_keep | edges_to_keep_inverted)  # TODO write with complement
+        edges_to_remove = set(subgraph.edges()) - (edges_to_keep | edges_to_keep_inverted)  # TODO write with nx.complement
         clips_graph.remove_edges_from(edges_to_remove)
+    for metric_name, metric_list in metric_lists.items():
+        plt.close()
+        plt.hist(metric_list, bins=20)
+        plt.title(metric_name)
+        plt.savefig(os.path.join(output_dir, '%s_hist_%s.png' % (video_file_name, metric_name)))
+    plt.close()
     components = nx.connected_components(clips_graph)
     clips = []
     for clip_id, component in enumerate(components):
@@ -433,7 +471,7 @@ def run(args):
     add_align(face_ds)
     add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index)
     embeddings_index = add_person_embedding(face_ds)
-    clips = get_clips(face_ds, frame_ds)
+    clips = get_clips(face_ds, frame_ds, args.output_dir, video_file_name)
     filtered_clips = filter_clips(face_ds, clips, fps)
     render_clips(filtered_clips, face_ds, args.output_dir, video_file_name, fps)
     compress_clips(args.output_dir, video_file_name)
