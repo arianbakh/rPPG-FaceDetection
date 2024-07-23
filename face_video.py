@@ -50,19 +50,19 @@ def get_frames(video_path):
     return fps, np.array(frames)
 
 
-def face_detection_process(process_index, process_frames, processes_return_dict):
+def face_detection_process(process_index, process_images, processes_return_dict):
     model = tf.function(
         retinaface_model.build_model(),
         input_signature=(tf.TensorSpec(shape=[None, None, None, 3], dtype=np.float32),),
     )
     detection_results = []
-    for frame in process_frames:
-        detection_result = RetinaFace.detect_faces(frame, model=model)
+    for image in process_images:
+        detection_result = RetinaFace.detect_faces(image, model=model)
         detection_results.append(detection_result)
     processes_return_dict[process_index] = detection_results
 
 
-def parallel_face_detection(images, num_processes):
+def parallel_inference(images, num_processes, process_function):
     manager = Manager()
     processes_return_dict = manager.dict()
     process_image_count = int(math.ceil(len(images) / num_processes))
@@ -72,7 +72,7 @@ def parallel_face_detection(images, num_processes):
             process_index * process_image_count:(process_index + 1) * process_image_count
         ]
         process = Process(
-            target=face_detection_process,
+            target=process_function,
             args=(process_index, process_images, processes_return_dict)
         )
         processes.append(process)
@@ -84,11 +84,11 @@ def parallel_face_detection(images, num_processes):
     for process_index, exit_code in enumerate(exit_codes):
         if exit_code != 0:
             raise Exception('Error: process %d has exit code %d' % (process_index, exit_code))
-    detection_results = []
+    results = []
     sorted_processes_return_dict = sorted(processes_return_dict.items(), key=lambda x: int(x[0]))
-    for process_index, process_detection_results in sorted_processes_return_dict:
-        detection_results += process_detection_results
-    return detection_results
+    for process_index, process_results in sorted_processes_return_dict:
+        results += process_results
+    return results
 
 
 def create_data_structures(frames, video_file_name, num_processes):
@@ -96,7 +96,7 @@ def create_data_structures(frames, video_file_name, num_processes):
     db_path = os.path.join('dbs', video_file_name)
     if not os.path.exists(db_path):
         os.makedirs(db_path)
-    detection_results = parallel_face_detection(frames, num_processes)
+    detection_results = parallel_inference(frames, num_processes, face_detection_process)
     face_ds = {}
     frame_ds = []
     for frame_index, frame in enumerate(frames):
@@ -236,7 +236,7 @@ def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index
             face_data['rotation_angle']
         )
         rotated_face_imgs.append(rotated_face_img)
-    rotated_detection_results = parallel_face_detection(rotated_face_imgs, num_processes)
+    rotated_detection_results = parallel_inference(rotated_face_imgs, num_processes, face_detection_process)
     for i, (face_id, face_data) in enumerate(face_ds.items()):
         face_img = get_face_image(
             rotated_face_imgs[i],
@@ -252,20 +252,29 @@ def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index
             )
 
 
-def add_person_embedding(face_ds):
-    print('Extracting person embeddings...')
-    embeddings = []
-    face_ids = []
+def embedding_process(process_index, process_images, processes_return_dict):
     model: FacialRecognition = modeling.build_model('Facenet512')
     target_size = model.input_shape
-    for i, (face_id, face_data) in enumerate(face_ds.items()): 
-        face_img = face_data['face_img']
-        processed_img = preprocessing.resize_image(img=face_img, target_size=(target_size[1], target_size[0]))
+    embeddings = []
+    for image in process_images:
+        processed_img = preprocessing.resize_image(img=image, target_size=(target_size[1], target_size[0]))
         processed_img = preprocessing.normalize_input(img=processed_img, normalization='base')
         embedding = model.forward(processed_img)
-        face_ds[face_id]['embedding'] = embedding
-        face_ids.append(face_id)
         embeddings.append(embedding)
+    processes_return_dict[process_index] = embeddings
+
+
+def add_person_embedding(face_ds, num_processes):
+    print('Extracting person embeddings...')
+    face_imgs = []
+    for i, (face_id, face_data) in enumerate(face_ds.items()):
+        face_img = face_data['face_img']
+        face_imgs.append(face_img)
+    embeddings = parallel_inference(face_imgs, num_processes, embedding_process)
+    face_ids = []
+    for i, (face_id, face_data) in enumerate(face_ds.items()):
+        face_ds[face_id]['embedding'] = embeddings[i]
+        face_ids.append(face_id)
     embeddings = np.array(embeddings)
     embeddings_index = {
         'embeddings': embeddings,
@@ -528,7 +537,7 @@ def run(args):
     face_ds, frame_ds = create_data_structures(frames, video_file_name, args.num_processes)
     add_align(face_ds)
     add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index, args.num_processes)
-    embeddings_index = add_person_embedding(face_ds)
+    embeddings_index = add_person_embedding(face_ds, args.num_processes)
     clips = get_clips(face_ds, frame_ds, args.output_dir, video_file_name)
     filtered_clips = filter_clips(face_ds, clips, fps)
     render_clips(filtered_clips, face_ds, args.output_dir, video_file_name, fps)
