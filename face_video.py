@@ -62,24 +62,18 @@ def face_detection_process(process_index, process_frames, processes_return_dict)
     processes_return_dict[process_index] = detection_results
 
 
-def create_data_structures(frames, video_file_name, num_processes):
-    print('Creating face and frame data structures...')
-    db_path = os.path.join('dbs', video_file_name)
-    if not os.path.exists(db_path):
-        os.makedirs(db_path)
-
-    # parallel face detection
+def parallel_face_detection(images, num_processes):
     manager = Manager()
     processes_return_dict = manager.dict()
-    process_frame_count = int(math.ceil(len(frames) / num_processes))
+    process_image_count = int(math.ceil(len(images) / num_processes))
     processes = []
     for process_index in range(num_processes):
-        process_frames = frames[
-            process_index * process_frame_count:(process_index + 1) * process_frame_count
+        process_images = images[
+            process_index * process_image_count:(process_index + 1) * process_image_count
         ]
         process = Process(
             target=face_detection_process,
-            args=(process_index, process_frames, processes_return_dict)
+            args=(process_index, process_images, processes_return_dict)
         )
         processes.append(process)
         process.start()
@@ -94,7 +88,15 @@ def create_data_structures(frames, video_file_name, num_processes):
     sorted_processes_return_dict = sorted(processes_return_dict.items(), key=lambda x: int(x[0]))
     for process_index, process_detection_results in sorted_processes_return_dict:
         detection_results += process_detection_results
+    return detection_results
 
+
+def create_data_structures(frames, video_file_name, num_processes):
+    print('Creating face and frame data structures...')
+    db_path = os.path.join('dbs', video_file_name)
+    if not os.path.exists(db_path):
+        os.makedirs(db_path)
+    detection_results = parallel_face_detection(frames, num_processes)
     face_ds = {}
     frame_ds = []
     for frame_index, frame in enumerate(frames):
