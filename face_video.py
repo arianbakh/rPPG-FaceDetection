@@ -342,7 +342,7 @@ def get_clips(face_ds, frame_ds, output_dir, video_file_name):
                 clips_graph.add_edge(current_frame_face_id, next_frame_face_id, weight=metrics['face_similarity'])
         nodes_subset = current_frame_face_ids + next_frame_face_ids
         subgraph = clips_graph.subgraph(nodes_subset).copy()
-        max_matching = nx.max_weight_matching(subgraph, maxcardinality=True)
+        max_matching = nx.max_weight_matching(subgraph, maxcardinality=False)
         edges_to_keep = set(max_matching)
         edges_to_keep_inverted = set([(a, b) for (b, a) in edges_to_keep])
         edges_to_remove = set(subgraph.edges()) - (edges_to_keep | edges_to_keep_inverted)  # TODO write with nx.complement
