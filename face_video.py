@@ -185,7 +185,7 @@ def crop_image(input_img, center_x, center_y, square_size):
     return output_img
 
 
-def get_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate=2):
+def get_rotated_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate=2):
     center_x, center_y, square_size = convert_coordinates(face_rect)
 
     # inflate bounding box
@@ -203,9 +203,10 @@ def get_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate
             expand=True
         )
     )
+    return rotated_face_img
 
-    # detect one face in the new image 
-    rotated_detection_result = RetinaFace.detect_faces(rotated_face_img)
+
+def get_face_image(rotated_face_img, rotated_detection_result, frame, face_rect):
     if len(rotated_detection_result) > 0:
         rotated_highest_score_face = max(
             rotated_detection_result.values(),  # TODO maybe include sort by larger area?
@@ -219,18 +220,29 @@ def get_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate
 
         return new_face_img
     else:
+        center_x, center_y, square_size = convert_coordinates(face_rect)
         original_face_img = crop_image(frame, center_x, center_y, square_size)
         return original_face_img
 
 
-def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index):
+def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index, num_processes):
     print('Extracting face images...')
+    rotated_face_imgs = []
     for i, (face_id, face_data) in enumerate(face_ds.items()):
-        face_img = get_face_image(
+        rotated_face_img = get_rotated_face_image(
             frame_ds[face_data['frame_index']]['frame_img'],
             face_data['face_rect'],
             face_data['rotation_direction'],
             face_data['rotation_angle']
+        )
+        rotated_face_imgs.append(rotated_face_img)
+    rotated_detection_results = parallel_face_detection(rotated_face_imgs, num_processes)
+    for i, (face_id, face_data) in enumerate(face_ds.items()):
+        face_img = get_face_image(
+            rotated_face_imgs[i],
+            rotated_detection_results[i],
+            frame_ds[face_data['frame_index']]['frame_img'],
+            face_data['face_rect']
         )
         face_ds[face_id]['face_img'] = face_img
         if i == sample_index:
@@ -515,7 +527,7 @@ def run(args):
     fps, frames = get_frames(args.video_path)
     face_ds, frame_ds = create_data_structures(frames, video_file_name, args.num_processes)
     add_align(face_ds)
-    add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index)
+    add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index, args.num_processes)
     embeddings_index = add_person_embedding(face_ds)
     clips = get_clips(face_ds, frame_ds, args.output_dir, video_file_name)
     filtered_clips = filter_clips(face_ds, clips, fps)
