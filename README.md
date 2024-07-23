@@ -8,4 +8,4 @@
 
 # Inference
 
-1. `python face_video.py --video-path videos/multiple_short.mp4 --output-dir outputs`
+1. `python face_video.py --video-path videos/multiple_short.mp4 --output-dir outputs --num-processes 16`

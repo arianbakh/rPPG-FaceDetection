@@ -21,11 +21,15 @@ from deepface import DeepFace
 from deepface.models.FacialRecognition import FacialRecognition
 from deepface.modules import modeling, preprocessing
 from deepface.modules.verification import find_cosine_distance, find_threshold
+from multiprocessing import Process, Manager
 from PIL import Image
 from retinaface import RetinaFace
+from retinaface.model import retinaface_model
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial.distance import pdist, squareform
+
+import tensorflow as tf  # should be imported after retinaface
 
 
 mpl.rcParams['axes.linewidth'] = 0
@@ -46,15 +50,55 @@ def get_frames(video_path):
     return fps, np.array(frames)
 
 
-def create_data_structures(frames, video_file_name):
+def face_detection_process(process_index, process_frames, processes_return_dict):
+    model = tf.function(
+        retinaface_model.build_model(),
+        input_signature=(tf.TensorSpec(shape=[None, None, None, 3], dtype=np.float32),),
+    )
+    detection_results = []
+    for frame in process_frames:
+        detection_result = RetinaFace.detect_faces(frame, model=model)
+        detection_results.append(detection_result)
+    processes_return_dict[process_index] = detection_results
+
+
+def create_data_structures(frames, video_file_name, num_processes):
     print('Creating face and frame data structures...')
     db_path = os.path.join('dbs', video_file_name)
     if not os.path.exists(db_path):
         os.makedirs(db_path)
+
+    # parallel face detection
+    manager = Manager()
+    processes_return_dict = manager.dict()
+    process_frame_count = int(math.ceil(len(frames) / num_processes))
+    processes = []
+    for process_index in range(num_processes):
+        process_frames = frames[
+            process_index * process_frame_count:(process_index + 1) * process_frame_count
+        ]
+        process = Process(
+            target=face_detection_process,
+            args=(process_index, process_frames, processes_return_dict)
+        )
+        processes.append(process)
+        process.start()
+    exit_codes = []
+    for process in processes:
+        process.join()
+        exit_codes.append(process.exitcode)
+    for process_index, exit_code in enumerate(exit_codes):
+        if exit_code != 0:
+            raise Exception('Error: process %d has exit code %d' % (process_index, exit_code))
+    detection_results = []
+    sorted_processes_return_dict = sorted(processes_return_dict.items(), key=lambda x: int(x[0]))
+    for process_index, process_detection_results in sorted_processes_return_dict:
+        detection_results += process_detection_results
+
     face_ds = {}
     frame_ds = []
     for frame_index, frame in enumerate(frames):
-        detection_result = RetinaFace.detect_faces(frame)
+        detection_result = detection_results[frame_index]
         frame_faces = []
         for face_index, face_instance in enumerate(detection_result.values()):
             face_id = '%d_%d' % (frame_index, face_index)
@@ -467,7 +511,7 @@ def run(args):
     video_file_name = os.path.basename(args.video_path).split('.')[0]
     sample_index = 0
     fps, frames = get_frames(args.video_path)
-    face_ds, frame_ds = create_data_structures(frames, video_file_name)
+    face_ds, frame_ds = create_data_structures(frames, video_file_name, args.num_processes)
     add_align(face_ds)
     add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index)
     embeddings_index = add_person_embedding(face_ds)
@@ -481,5 +525,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--video-path', type=str, help='Path of input raw video')
     parser.add_argument('--output-dir', type=str, help='Path of output faces video')
+    parser.add_argument('--num-processes', type=int, default=1, help='Number of parallel processes for DNNs (essentially batch size)')
     args = parser.parse_args()
     run(args)
