@@ -63,6 +63,8 @@ def create_data_structures(frames, video_file_name, num_processes):
                 'face_rect': face_rect,
                 'right_eye': face_instance['landmarks']['right_eye'],
                 'left_eye': face_instance['landmarks']['left_eye'],
+                'right_mouth': face_instance['landmarks']['mouth_right'],
+                'left_mouth': face_instance['landmarks']['mouth_left'],
                 'frame_index': frame_index,
             }
             frame_faces.append(face_id)
@@ -77,33 +79,66 @@ def euclidean_distance(a, b):
     return np.linalg.norm(np.array(a) - np.array(b))
 
 
-def get_rotation(right_eye, left_eye):
+def get_rotation(right_eye, left_eye, right_mouth, left_mouth):
     """
     from https://sefiks.com/2020/02/23/face-alignment-for-face-recognition-in-python-within-opencv/
     """
     right_eye_x, right_eye_y = right_eye
     left_eye_x, left_eye_y = left_eye
     if left_eye_y < right_eye_y:
-        point = (right_eye_x, left_eye_y)
-        direction = -1 # clockwise
+        eye_point = (right_eye_x, left_eye_y)
+        eye_direction = -1 # clockwise
     else:
-        point = (left_eye_x, right_eye_y)
-        direction = 1  # counter-clockwise
-    a = euclidean_distance(left_eye, point)
-    b = euclidean_distance(right_eye, left_eye)
-    c = euclidean_distance(right_eye, point)
-    cos_a = (b ** 2 + c ** 2 - a ** 2) / (2 * b * c)
-    angle = np.arccos(cos_a)  # radians
-    angle = (angle * 180) / math.pi  # degrees
-    if direction == -1:
-        angle = 90 - angle
+        eye_point = (left_eye_x, right_eye_y)
+        eye_direction = 1  # counter-clockwise
+    eye_a = euclidean_distance(left_eye, eye_point)
+    eye_b = euclidean_distance(right_eye, left_eye)
+    eye_c = euclidean_distance(right_eye, eye_point)
+    cos_eye_a = (eye_b ** 2 + eye_c ** 2 - eye_a ** 2) / (2 * eye_b * eye_c)
+    eye_angle = np.arccos(cos_eye_a)  # radians
+    eye_angle = (eye_angle * 180) / math.pi  # degrees
+    if eye_direction == -1:
+        eye_angle = 90 - eye_angle  # always positive and within [0, 90]
+
+    right_mouth_x, right_mouth_y = right_mouth
+    left_mouth_x, left_mouth_y = left_mouth
+    if left_mouth_y < right_mouth_y:
+        mouth_point = (right_mouth_x, left_mouth_y)
+        mouth_direction = -1 # clockwise
+    else:
+        mouth_point = (left_mouth_x, right_mouth_y)
+        mouth_direction = 1  # counter-clockwise
+    mouth_a = euclidean_distance(left_mouth, mouth_point)
+    mouth_b = euclidean_distance(right_mouth, left_mouth)
+    mouth_c = euclidean_distance(right_mouth, mouth_point)
+    cos_mouth_a = (mouth_b ** 2 + mouth_c ** 2 - mouth_a ** 2) / (2 * mouth_b * mouth_c)
+    mouth_angle = np.arccos(cos_mouth_a)  # radians
+    mouth_angle = (mouth_angle * 180) / math.pi  # degrees
+    if mouth_direction == -1:
+        mouth_angle = 90 - mouth_angle  # always positive and within [0, 90]
+
+    if mouth_direction == eye_direction:
+        direction = mouth_direction
+        angle = (mouth_angle + eye_angle) / 2
+    else:
+        if mouth_angle >= eye_angle:
+            direction = mouth_direction
+            angle = (mouth_angle - eye_angle) / 2
+        else:
+            direction = eye_direction
+            angle = (eye_angle - mouth_angle) / 2
     return direction, angle
 
 
 def add_align(face_ds):
     print('Aligning faces...')
     for face_id, face_data in face_ds.items():
-        rotation_direction, rotation_angle = get_rotation(face_data['right_eye'], face_data['left_eye'])
+        rotation_direction, rotation_angle = get_rotation(
+            face_data['right_eye'],
+            face_data['left_eye'],
+            face_data['right_mouth'],
+            face_data['left_mouth']
+        )
         face_ds[face_id]['rotation_direction'] = rotation_direction
         face_ds[face_id]['rotation_angle'] = rotation_angle
 
