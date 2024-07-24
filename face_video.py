@@ -1,11 +1,17 @@
 import os
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["OMP_NUM_THREADS"] = "4"
 os.environ["OPENBLAS_NUM_THREADS"] = "4"
 os.environ["MKL_NUM_THREADS"] = "6"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "4"
 os.environ["NUMEXPR_NUM_THREADS"] = "6"
+os.environ["RETINAFACE_LOG_LEVEL"] = "40"
+
+from parallel_inference import parallel_inference,\
+    face_detection_process,\
+    embedding_process,\
+    antispoof_process  # should be imported at the top
 
 import argparse
 import cv2
@@ -17,19 +23,8 @@ import numpy as np
 import shutil
 import sys
 
-from deepface import DeepFace
-from deepface.models.FacialRecognition import FacialRecognition
-from deepface.modules import modeling, preprocessing
 from deepface.modules.verification import find_cosine_distance, find_threshold
-from multiprocessing import Process, Manager
 from PIL import Image
-from retinaface import RetinaFace
-from retinaface.model import retinaface_model
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import connected_components
-from scipy.spatial.distance import pdist, squareform
-
-import tensorflow as tf  # should be imported after retinaface
 
 
 mpl.rcParams['axes.linewidth'] = 0
@@ -48,47 +43,6 @@ def get_frames(video_path):
         frames.append(frame)
         success, frame = video.read()
     return fps, np.array(frames)
-
-
-def face_detection_process(process_index, process_images, processes_return_dict):
-    model = tf.function(
-        retinaface_model.build_model(),
-        input_signature=(tf.TensorSpec(shape=[None, None, None, 3], dtype=np.float32),),
-    )
-    detection_results = []
-    for image in process_images:
-        detection_result = RetinaFace.detect_faces(image, model=model)
-        detection_results.append(detection_result)
-    processes_return_dict[process_index] = detection_results
-
-
-def parallel_inference(images, num_processes, process_function):
-    manager = Manager()
-    processes_return_dict = manager.dict()
-    process_image_count = int(math.ceil(len(images) / num_processes))
-    processes = []
-    for process_index in range(num_processes):
-        process_images = images[
-            process_index * process_image_count:(process_index + 1) * process_image_count
-        ]
-        process = Process(
-            target=process_function,
-            args=(process_index, process_images, processes_return_dict)
-        )
-        processes.append(process)
-        process.start()
-    exit_codes = []
-    for process in processes:
-        process.join()
-        exit_codes.append(process.exitcode)
-    for process_index, exit_code in enumerate(exit_codes):
-        if exit_code != 0:
-            raise Exception('Error: process %d has exit code %d' % (process_index, exit_code))
-    results = []
-    sorted_processes_return_dict = sorted(processes_return_dict.items(), key=lambda x: int(x[0]))
-    for process_index, process_results in sorted_processes_return_dict:
-        results += process_results
-    return results
 
 
 def create_data_structures(frames, video_file_name, num_processes):
@@ -252,18 +206,6 @@ def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index
             )
 
 
-def embedding_process(process_index, process_images, processes_return_dict):
-    model: FacialRecognition = modeling.build_model('Facenet512')
-    target_size = model.input_shape
-    embeddings = []
-    for image in process_images:
-        processed_img = preprocessing.resize_image(img=image, target_size=(target_size[1], target_size[0]))
-        processed_img = preprocessing.normalize_input(img=processed_img, normalization='base')
-        embedding = model.forward(processed_img)
-        embeddings.append(embedding)
-    processes_return_dict[process_index] = embeddings
-
-
 def add_person_embedding(face_ds, num_processes):
     print('Extracting person embeddings...')
     face_imgs = []
@@ -359,7 +301,7 @@ def get_face_similarity(face_ds, frame_ds, face_id1, face_id2):
     area_similarity = get_area_similarity(face_ds, face_id1, face_id2)
     deep_similarity = (same_person + embedding_similarity) * resolution_coefficient / 2
     classic_similarity = (iou_similarity + location_similarity * area_similarity) / 2
-    face_similarity = (deep_similarity + classic_similarity) / 2 - 0.5  # TODO
+    face_similarity = (deep_similarity + classic_similarity) / 2 - 0.5
     metrics = {
         'face_similarity': face_similarity,
         'embedding_similarity': embedding_similarity,
@@ -447,17 +389,20 @@ def remove_short(clips, length_threshold):
     return filtered_clips
 
 
-def remove_spoofed(face_ds, clips, vote_threshold=0.05):
-    antispoof_model = modeling.build_model(model_name='Fasnet')
+def remove_spoofed(face_ds, clips, num_processes, vote_threshold=0.05):
+    face_imgs = []
+    for clip in clips:
+        for face_id in clip['face_ids']:
+            face_img = face_ds[face_id]['face_img']
+            face_imgs.append(face_img)
+    is_reals = parallel_inference(face_imgs, num_processes, antispoof_process)
     filtered_clips = []
+    counter = 0
     for clip in clips:
         votes = []
         for face_id in clip['face_ids']:
-            face_img = face_ds[face_id]['face_img']
-            is_real, _ = antispoof_model.analyze(
-                img=face_img,
-                facial_area=(0, 0, face_img.shape[0], face_img.shape[1])
-            )
+            is_real = is_reals[counter]
+            counter += 1
             votes.append(is_real)
         mean_vote = np.mean(votes)
         if mean_vote >= vote_threshold:
@@ -465,10 +410,10 @@ def remove_spoofed(face_ds, clips, vote_threshold=0.05):
     return filtered_clips
 
 
-def filter_clips(face_ds, clips, fps):
+def filter_clips(face_ds, clips, fps, num_processes):
     print('Filtering clips...')
     filtered_clips = remove_short(clips, fps)
-    filtered_clips = remove_spoofed(face_ds, filtered_clips)
+    filtered_clips = remove_spoofed(face_ds, filtered_clips, num_processes)
     return filtered_clips
 
 
@@ -539,7 +484,7 @@ def run(args):
     add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index, args.num_processes)
     embeddings_index = add_person_embedding(face_ds, args.num_processes)
     clips = get_clips(face_ds, frame_ds, args.output_dir, video_file_name)
-    filtered_clips = filter_clips(face_ds, clips, fps)
+    filtered_clips = filter_clips(face_ds, clips, fps, args.num_processes)
     render_clips(filtered_clips, face_ds, args.output_dir, video_file_name, fps)
     compress_clips(args.output_dir, video_file_name)
 
