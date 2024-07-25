@@ -410,6 +410,7 @@ def get_clips(face_ds, frame_ds, output_dir, video_file_name):
         sorted_face_ids = [node_id for node_id, _ in sorted_nodes]
         clip = {
             'clip_id': clip_id,
+            'start_frame': sorted_nodes[0][1],
             'face_ids': sorted_face_ids,
         }
         clips.append(clip)
@@ -497,7 +498,7 @@ def render_clips(clips, face_ds, output_dir, video_file_name, fps):
         shutil.rmtree(clips_dir)
     os.makedirs(clips_dir)
     for clip in clips:
-        clip_path = os.path.join(clips_dir, 'clip%d.avi' % (clip['clip_id']))
+        clip_path = os.path.join(clips_dir, 'clip%d-f%d.avi' % (clip['clip_id'], clip['start_frame']))
         clip_imgs = get_clip_images(face_ds, clip)
         save_face_video(clip_imgs, clip_path, fps)
 
