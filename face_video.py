@@ -462,10 +462,9 @@ def remove_static(
     fps,
     output_dir,
     video_file_name,
-    landmarks=['left_eye', 'right_eye', 'left_mouth', 'right_mouth', 'nose'],
+    landmarks=['left_eye', 'right_eye', 'left_mouth', 'right_mouth'],
     cutoff_freq=1.5,
-    x_threshold=1,
-    y_threshold=1
+    mean_distance_diff_threshold=0.0006,
 ):
     plots_dir = os.path.join(output_dir, '%s_landmark_plots' % video_file_name)
     if not os.path.exists(plots_dir):
@@ -474,31 +473,30 @@ def remove_static(
     for i, clip in enumerate(clips):
         is_statics = []
         for landmark in landmarks:
-            for dimension in range(2):
-                landmark_data = []
-                for face_id in clip['face_ids']:
-                    landmark_data.append(face_ds[face_id][landmark][dimension])
-                landmark_data = np.array(landmark_data)
-                filtered_landmark_data = low_pass_filter(landmark_data, cutoff_freq, fps)
-                face_size = face_ds[clip['face_ids'][0]]['face_img'].shape[0]  # assuming all square and all equal
-                filtered_std = np.std(filtered_landmark_data)
-                relative_std_percent = filtered_std / face_size * 100
-                dimension_name = 'x' if dimension == 0 else 'y'
-                threshold = x_threshold if dimension_name == 'x' else y_threshold
-                is_static = relative_std_percent < threshold
-                is_statics.append(is_static)
+            landmark_vectors = []
+            for face_id in clip['face_ids']:
+                landmark_vectors.append(np.array(face_ds[face_id][landmark]) - np.array(face_ds[face_id]['nose']))
+            landmark_vectors = np.array(landmark_vectors)
+            filtered_landmark_vectors = low_pass_filter(landmark_vectors, cutoff_freq, fps)
+            landmark_distances = np.sqrt(filtered_landmark_vectors[:, 0] ** 2 + filtered_landmark_vectors[:, 1] ** 2)
+            _, _, face_size = convert_coordinates(face_ds[clip['face_ids'][0]]['face_rect'])
+            normalized_distances = landmark_distances / face_size
+            normalized_distance_diffs = np.abs(normalized_distances[1:] - normalized_distances[:-1])
+            mean_distance_diff = np.mean(normalized_distance_diffs)
+            is_static = mean_distance_diff < mean_distance_diff_threshold
+            is_statics.append(is_static)
 
-                # save plot
-                plt.close()
-                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
-                ax1.plot(landmark_data)
-                ax2.plot(filtered_landmark_data)
-                ax1.set_title('%s %s' % (landmark, dimension_name))
-                ax2.set_title('Filtered %s %s; Relative Standard Deviation: %.2f%%' % (landmark, dimension_name, relative_std_percent))
-                plt.savefig(os.path.join(plots_dir, 'multiple_short_%s_%s_%s.png' % (clip['clip_id'], landmark, dimension_name)))
-                plt.close()
+            # save plot
+            plt.close()
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+            ax1.plot(normalized_distances)
+            ax2.plot(normalized_distance_diffs)
+            ax1.set_title('%s distance to nose' % (landmark))
+            ax2.set_title('%s delta distance to nose; mean delta distance: %.2f (x10,000)' % (landmark, mean_distance_diff * 10000))
+            plt.savefig(os.path.join(plots_dir, 'multiple_short_%s_%s.png' % (clip['clip_id'], landmark)))
+            plt.close()
         majority_vote = sum(is_statics) / len(is_statics)
-        if majority_vote < 0.5:
+        if majority_vote <= 0.5:
             filtered_clips.append(clip)
     return filtered_clips
 
