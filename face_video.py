@@ -24,6 +24,7 @@ import shutil
 import sys
 
 from deepface.modules.verification import find_cosine_distance, find_threshold
+from multiprocessing import Pool, cpu_count
 from PIL import Image
 from scipy.signal import butter, filtfilt
 
@@ -176,68 +177,93 @@ def crop_image(input_img, center_x, center_y, square_size):
     return output_img
 
 
-def get_rotated_face_image(frame, face_rect, rotation_direction, rotation_angle, inflate=2):
-    center_x, center_y, square_size = convert_coordinates(face_rect)
+def rotate_point(px, py, cx, cy, angle, direction):
+    angle_rad = direction * math.radians(angle)
+    translated_x = px - cx
+    translated_y = py - cy
+    rotated_x = translated_x * math.cos(angle_rad) - translated_y * math.sin(angle_rad)
+    rotated_y = translated_x * math.sin(angle_rad) + translated_y * math.cos(angle_rad)
+    new_x = rotated_x + cx
+    new_y = rotated_y + cy
+    return new_x, new_y
 
-    # inflate bounding box
-    inflated_square_size = round(square_size * inflate)
 
-    # get inflated face image
-    face_img = crop_image(frame, center_x, center_y, inflated_square_size)
+def rotate_point_on_frame(px, py, frame_shape, rotated_frame_shape, angle, direction):
+    frame_center_x = frame_shape[1] / 2
+    frame_center_y = frame_shape[0] / 2
+    rotated_px, rotated_py = rotate_point(px, py, frame_center_x, frame_center_y, angle, -direction)
+    rotated_px += (rotated_frame_shape[1] - frame_shape[1]) / 2
+    rotated_py += (rotated_frame_shape[0] - frame_shape[0]) / 2
+    return round(rotated_px), round(rotated_py)
 
-    # rotate inflated face image
-    rotated_face_img = Image.fromarray(face_img)
-    rotated_face_img = np.array(
-        rotated_face_img.rotate(
+
+def rotate_thread(arguments):
+    frame, rotation_direction, rotation_angle = arguments
+    rotated_frame = Image.fromarray(frame)
+    rotated_frame = np.array(
+        rotated_frame.rotate(
             rotation_direction * rotation_angle,
             resample=Image.BICUBIC,
             expand=True
         )
     )
-    return rotated_face_img
+    return rotated_frame
 
 
-def get_face_image(rotated_face_img, rotated_detection_result, frame, face_rect):
-    if len(rotated_detection_result) > 0:
-        rotated_highest_score_face = max(
-            rotated_detection_result.values(),  # TODO maybe include sort by larger area?
-            key=lambda x: x['score']
-        )  # only use one face with the highest score
+def get_rotated_face_image(frame, rotated_frame, face_rect, rotation_direction, rotation_angle):
+    center_x, center_y, square_size = convert_coordinates(face_rect)
+    original_face_img = crop_image(frame, center_x, center_y, square_size)
+    half_square_size = round(square_size / 2)
+    corners = [
+        (center_x - half_square_size, center_y - half_square_size),
+        (center_x + half_square_size, center_y - half_square_size),
+        (center_x - half_square_size, center_y + half_square_size),
+        (center_x + half_square_size, center_y + half_square_size)
+    ]
+    rotated_corners = []
+    for corner in corners:
+        rotated_corners.append(
+            rotate_point_on_frame(
+                corner[0],
+                corner[1],
+                frame.shape,
+                rotated_frame.shape,
+                rotation_angle,
+                rotation_direction
+            )
+        )
+    min_x = min([corner[0] for corner in rotated_corners])
+    max_x = max([corner[0] for corner in rotated_corners])
+    min_y = min([corner[1] for corner in rotated_corners])
+    max_y = max([corner[1] for corner in rotated_corners])
+    rotated_face_img = rotated_frame[min_y:max_y, min_x:max_x, :]
 
-        new_center_x, new_center_y, new_square_size = convert_coordinates(rotated_highest_score_face['facial_area'])
-
-        # crop the face
-        new_face_img = crop_image(rotated_face_img, new_center_x, new_center_y, new_square_size)
-
-        return new_face_img
-    else:
-        center_x, center_y, square_size = convert_coordinates(face_rect)
-        original_face_img = crop_image(frame, center_x, center_y, square_size)
-        return original_face_img
+    return original_face_img, rotated_face_img
 
 
 def add_face_images(face_ds, frame_ds, output_dir, video_file_name, sample_index, num_processes):
     print('Extracting face images...')
-    rotated_face_imgs = []
-    for i, (face_id, face_data) in enumerate(face_ds.items()):
-        rotated_face_img = get_rotated_face_image(
+    arguments = []
+    for face_id, face_data in face_ds.items():
+        arguments.append((
             frame_ds[face_data['frame_index']]['frame_img'],
+            face_data['rotation_direction'],
+            face_data['rotation_angle']
+        ))
+    with Pool(cpu_count() - 1) as pool:
+        rotated_frames = pool.map(rotate_thread, arguments)
+    for i, (face_id, face_data) in enumerate(face_ds.items()):
+        original_face_img, rotated_face_img = get_rotated_face_image(
+            frame_ds[face_data['frame_index']]['frame_img'],
+            rotated_frames[i],
             face_data['face_rect'],
             face_data['rotation_direction'],
             face_data['rotation_angle']
         )
-        rotated_face_imgs.append(rotated_face_img)
-    rotated_detection_results = parallel_inference(rotated_face_imgs, num_processes, face_detection_process)
-    for i, (face_id, face_data) in enumerate(face_ds.items()):
-        face_img = get_face_image(
-            rotated_face_imgs[i],
-            rotated_detection_results[i],
-            frame_ds[face_data['frame_index']]['frame_img'],
-            face_data['face_rect']
-        )
-        face_ds[face_id]['face_img'] = face_img
+        face_ds[face_id]['face_img'] = rotated_face_img
+        face_ds[face_id]['original_face_img'] = original_face_img
         if i == sample_index:
-            plt.imshow(face_img)
+            plt.imshow(rotated_face_img)
             plt.savefig(
                 os.path.join(output_dir, '%s_face%d.png' % (video_file_name, sample_index))
             )
@@ -431,7 +457,7 @@ def remove_spoofed(face_ds, clips, num_processes, vote_threshold=0.05):
     face_imgs = []
     for clip in clips:
         for face_id in clip['face_ids']:
-            face_img = face_ds[face_id]['face_img']
+            face_img = face_ds[face_id]['original_face_img']
             face_imgs.append(face_img)
     is_reals = parallel_inference(face_imgs, num_processes, antispoof_process)
     filtered_clips = []
