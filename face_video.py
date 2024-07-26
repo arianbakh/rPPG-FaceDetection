@@ -25,6 +25,7 @@ import sys
 
 from deepface.modules.verification import find_cosine_distance, find_threshold
 from PIL import Image
+from scipy.signal import butter, filtfilt
 
 
 mpl.rcParams['axes.linewidth'] = 0
@@ -65,6 +66,7 @@ def create_data_structures(frames, video_file_name, num_processes):
                 'left_eye': face_instance['landmarks']['left_eye'],
                 'right_mouth': face_instance['landmarks']['mouth_right'],
                 'left_mouth': face_instance['landmarks']['mouth_left'],
+                'nose': face_instance['landmarks']['nose'],
                 'frame_index': frame_index,
             }
             frame_faces.append(face_id)
@@ -446,10 +448,66 @@ def remove_spoofed(face_ds, clips, num_processes, vote_threshold=0.05):
     return filtered_clips
 
 
-def filter_clips(face_ds, clips, fps, num_processes):
+def low_pass_filter(data, cutoff, fs, order=4):
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    y = filtfilt(b, a, data, axis=0)
+    return y
+
+
+def remove_static(
+    face_ds,
+    clips,
+    fps,
+    output_dir,
+    video_file_name,
+    landmarks=['left_eye', 'right_eye', 'left_mouth', 'right_mouth', 'nose'],
+    cutoff_freq=1.5,
+    x_threshold=10,
+    y_threshold=2
+):
+    plots_dir = os.path.join(output_dir, '%s_landmark_plots' % video_file_name)
+    if not os.path.exists(plots_dir):
+        os.makedirs(plots_dir)
+    filtered_clips = []
+    for i, clip in enumerate(clips):
+        is_statics = []
+        for landmark in landmarks:
+            for dimension in range(2):
+                landmark_data = []
+                for face_id in clip['face_ids']:
+                    landmark_data.append(face_ds[face_id][landmark][dimension])
+                landmark_data = np.array(landmark_data)
+                filtered_landmark_data = low_pass_filter(landmark_data, cutoff_freq, fps)
+                face_size = face_ds[clip['face_ids'][0]]['face_img'].shape[0]  # assuming all square and all equal
+                filtered_std = np.std(filtered_landmark_data)
+                relative_std_percent = filtered_std / face_size * 100
+                dimension_name = 'x' if dimension == 0 else 'y'
+                threshold = x_threshold if dimension_name == 'x' else y_threshold
+                is_static = relative_std_percent < threshold
+                is_statics.append(is_static)
+
+                # save plot
+                plt.close()
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+                ax1.plot(landmark_data)
+                ax2.plot(filtered_landmark_data)
+                ax1.set_title('%s %s' % (landmark, dimension_name))
+                ax2.set_title('Filtered %s %s; Relative Standard Deviation: %.2f%%' % (landmark, dimension_name, relative_std_percent))
+                plt.savefig(os.path.join(plots_dir, 'multiple_short_%s_%s_%s.png' % (clip['clip_id'], landmark, dimension_name)))
+                plt.close()
+        majority_vote = sum(is_statics) / len(is_statics)
+        if majority_vote < 0.5:
+            filtered_clips.append(clip)
+    return filtered_clips
+
+
+def filter_clips(face_ds, clips, fps, num_processes, output_dir, video_file_name):
     print('Filtering clips...')
     filtered_clips = remove_short(clips, fps)
     filtered_clips = remove_spoofed(face_ds, filtered_clips, num_processes)
+    filtered_clips = remove_static(face_ds, filtered_clips, fps, output_dir, video_file_name)
     return filtered_clips
 
 
@@ -520,7 +578,7 @@ def run(args):
     add_face_images(face_ds, frame_ds, args.output_dir, video_file_name, sample_index, args.num_processes)
     embeddings_index = add_person_embedding(face_ds, args.num_processes)
     clips = get_clips(face_ds, frame_ds, args.output_dir, video_file_name)
-    filtered_clips = filter_clips(face_ds, clips, fps, args.num_processes)
+    filtered_clips = filter_clips(face_ds, clips, fps, args.num_processes, args.output_dir, video_file_name)
     render_clips(filtered_clips, face_ds, args.output_dir, video_file_name, fps)
     compress_clips(args.output_dir, video_file_name)
 
