@@ -464,8 +464,8 @@ def remove_static(
     video_file_name,
     landmarks=['left_eye', 'right_eye', 'left_mouth', 'right_mouth', 'nose'],
     cutoff_freq=1.5,
-    x_threshold=10,
-    y_threshold=2
+    x_threshold=1,
+    y_threshold=1
 ):
     plots_dir = os.path.join(output_dir, '%s_landmark_plots' % video_file_name)
     if not os.path.exists(plots_dir):
